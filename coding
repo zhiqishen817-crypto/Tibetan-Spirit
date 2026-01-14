@@ -1,0 +1,544 @@
+import time
+import random
+
+
+class DigitalLegacySystem:
+    def __init__(self):
+        self.smooth_breath = 0.5
+        self.alpha = 0.15
+        self.total_assets = 100
+        self.current_blur = 50.0
+        self.mandala_database = []
+        self.max_mandala_entries = 240
+        self.is_active = False
+        self._active_flower = None
+
+    def process_signals(self, raw_z_depth):
+        """
+        PHASE 01 & 02: Sensing & Processing
+        Filters raw biometric signals and maps them to a normalized parameter.
+        """
+        self.smooth_breath = (self.alpha * raw_z_depth) + ((1 - self.alpha) * self.smooth_breath)
+        latent_param = (self.smooth_breath - 0.02) / (0.08 - 0.02)
+        if latent_param < 0.0:
+            latent_param = 0.0
+        elif latent_param > 1.0:
+            latent_param = 1.0
+        return latent_param
+
+    def get_beadwork_asset(self, latent_param):
+        asset_index = int(latent_param * (self.total_assets - 1))
+        if asset_index < 0:
+            asset_index = 0
+        elif asset_index >= self.total_assets:
+            asset_index = self.total_assets - 1
+        return f"beadwork_motif_{asset_index}.png"
+
+    def update_render_state(self, delta_time, is_active):
+        if is_active:
+            self.current_blur = max(0.0, self.current_blur - (delta_time * 20.0))
+        else:
+            self.current_blur = 50.0
+        return self.current_blur
+
+    def archive_user_flower(self, flower_id, lidar_coord, flower=None):
+        legacy_entry = {
+            "asset_id": flower_id,
+            "coordinates": lidar_coord,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if isinstance(flower, dict):
+            legacy_entry["flower"] = {
+                "color_hex": flower.get("color_hex"),
+                "contour": flower.get("contour"),
+                "petal_layers": flower.get("petal_layers"),
+            }
+        self.mandala_database.append(legacy_entry)
+        if len(self.mandala_database) > self.max_mandala_entries:
+            self.mandala_database = self.mandala_database[-self.max_mandala_entries :]
+        return legacy_entry
+
+    def get_edge_position(self, lidar_x, lidar_y):
+        def clamp01(v, default=0.5):
+            if v is None:
+                return default
+            if v < 0.0:
+                return 0.0
+            if v > 1.0:
+                return 1.0
+            return float(v)
+
+        x = clamp01(lidar_x, 0.5)
+        y = clamp01(lidar_y, 0.5)
+
+        d_top = y
+        d_bottom = 1.0 - y
+        d_left = x
+        d_right = 1.0 - x
+
+        m = min(d_top, d_bottom, d_left, d_right)
+        if m == d_top:
+            return (x, 0.0)
+        if m == d_bottom:
+            return (x, 1.0)
+        if m == d_left:
+            return (0.0, y)
+        return (1.0, y)
+
+    def update(self, delta_time=0.016, is_active=False, step_speed=None, breath_cycle=None, lidar_coord=(0.5, 0.5)):
+        def clamp01(v, default=None):
+            if v is None:
+                return default
+            if v < 0.0:
+                return 0.0
+            if v > 1.0:
+                return 1.0
+            return float(v)
+
+        def stable_hash01(*parts):
+            text = "|".join(str(p) for p in parts)
+            h = 2166136261
+            for ch in text:
+                h ^= ord(ch)
+                h = (h * 16777619) & 0xFFFFFFFF
+            return (h % 10000) / 10000.0
+
+        def lerp(a, b, t):
+            return int(a + (b - a) * t)
+
+        was_active = self.is_active
+        self.is_active = bool(is_active)
+
+        archived_entry = None
+        if was_active and not self.is_active:
+            if isinstance(self._active_flower, dict):
+                lx = self._active_flower.get("lidar_x", 0.5)
+                ly = self._active_flower.get("lidar_y", 0.5)
+                edge_pos = self.get_edge_position(lx, ly)
+                flower_id = self._active_flower.get("asset")
+                archived_entry = self.archive_user_flower(
+                    flower_id=flower_id,
+                    lidar_coord=(lx, ly),
+                    flower=self._active_flower,
+                )
+                archived_entry["edge_pos"] = edge_pos
+            self._active_flower = None
+
+        if self.is_active:
+            step = clamp01(step_speed)
+            breath = clamp01(breath_cycle)
+            if isinstance(lidar_coord, (tuple, list)) and len(lidar_coord) >= 2:
+                lx = clamp01(lidar_coord[0], 0.5)
+                ly = clamp01(lidar_coord[1], 0.5)
+            else:
+                lx = 0.5
+                ly = 0.5
+
+            if breath is None:
+                raw_z_depth = random.uniform(0.02, 0.08)
+            else:
+                raw_z_depth = 0.02 + (0.08 - 0.02) * breath
+
+            latent = {
+                "breath_latent": self.process_signals(raw_z_depth),
+                "step_latent": 0.5 if step is None else step,
+                "lidar_x": lx,
+                "lidar_y": ly,
+            }
+
+            breath_latent = latent["breath_latent"]
+            step_latent = latent["step_latent"]
+
+            jitter = stable_hash01(round(step_latent, 2), round(breath_latent, 2), round(lx, 2), round(ly, 2))
+            latent_param = clamp01(0.85 * breath_latent + 0.15 * jitter, 0.5)
+            asset = self.get_beadwork_asset(latent_param)
+
+            calm = (120, 200, 255)
+            vivid = (255, 120, 200)
+            t = clamp01(step_latent, 0.5)
+            color_hex = f"#{lerp(calm[0], vivid[0], t):02x}{lerp(calm[1], vivid[1], t):02x}{lerp(calm[2], vivid[2], t):02x}"
+
+            if step_latent <= 0.5:
+                color = "pure"
+                contour = "smooth"
+            else:
+                color = "mottled"
+                contour = "sharp"
+
+            petal_layers = 1 + int(breath_latent * 6)
+            if petal_layers < 1:
+                petal_layers = 1
+            if petal_layers > 7:
+                petal_layers = 7
+
+            style = {
+                "asset": asset,
+                "color": color,
+                "color_hex": color_hex,
+                "contour": contour,
+                "petal_layers": petal_layers,
+            }
+            blur = self.update_render_state(delta_time=delta_time, is_active=True)
+            flower = {
+                **style,
+                **latent,
+                "blur": blur,
+            }
+            self._active_flower = flower
+            return flower, archived_entry
+
+        blur = self.update_render_state(delta_time=delta_time, is_active=False)
+        return None, archived_entry
+
+
+def main():
+    system = DigitalLegacySystem()
+    flower, archived = system.update(delta_time=0.016, is_active=True, step_speed=None, breath_cycle=None, lidar_coord=(0.5, 0.5))
+    print("Active flower:")
+    print(flower)
+    flower, archived = system.update(delta_time=0.016, is_active=False)
+    print("Archived entry:")
+    print(archived)
+    print("Mandala database size:", len(system.mandala_database))
+
+
+if __name__ == "__main__":
+    main()
+import math
+import tkinter as tk
+
+from digital_legacy_system import DigitalLegacySystem
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.system = DigitalLegacySystem()
+
+        self.root.title("Digital Legacy Flower")
+        self.root.geometry("960x640")
+
+        self.canvas = tk.Canvas(self.root, width=640, height=640, bg="#0b1020", highlightthickness=0)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
+
+        self.panel = tk.Frame(self.root)
+        self.panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self.manual_var = tk.IntVar(value=0)
+        self.present_var = tk.IntVar(value=1)
+        self.step_var = tk.DoubleVar(value=0.5)
+        self.breath_var = tk.DoubleVar(value=0.5)
+        self.lidar_x_var = tk.DoubleVar(value=0.5)
+        self.lidar_y_var = tk.DoubleVar(value=0.5)
+
+        self._build_panel()
+
+        self.last_flower = None
+        self.last_archived = None
+        self._tick()
+
+    def _build_panel(self):
+        header = tk.Label(self.panel, text="Controls", font=("Helvetica", 16, "bold"))
+        header.pack(anchor="w", padx=12, pady=(12, 8))
+
+        present = tk.Checkbutton(self.panel, text="Participant present", variable=self.present_var)
+        present.pack(anchor="w", padx=12, pady=(0, 8))
+
+        manual = tk.Checkbutton(self.panel, text="Manual input", variable=self.manual_var, command=self._on_manual_toggle)
+        manual.pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.step_label = tk.Label(self.panel, text="Step speed (0-1)")
+        self.step_label.pack(anchor="w", padx=12)
+        self.step_scale = tk.Scale(
+            self.panel,
+            from_=0.0,
+            to=1.0,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            length=260,
+            variable=self.step_var,
+        )
+        self.step_scale.pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.breath_label = tk.Label(self.panel, text="Breath cycle (0-1)")
+        self.breath_label.pack(anchor="w", padx=12)
+        self.breath_scale = tk.Scale(
+            self.panel,
+            from_=0.0,
+            to=1.0,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            length=260,
+            variable=self.breath_var,
+        )
+        self.breath_scale.pack(anchor="w", padx=12, pady=(0, 12))
+
+        lidar_header = tk.Label(self.panel, text="LiDAR position (0-1)")
+        lidar_header.pack(anchor="w", padx=12, pady=(6, 0))
+
+        self.lidar_x_label = tk.Label(self.panel, text="LiDAR X")
+        self.lidar_x_label.pack(anchor="w", padx=12)
+        self.lidar_x_scale = tk.Scale(
+            self.panel,
+            from_=0.0,
+            to=1.0,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            length=260,
+            variable=self.lidar_x_var,
+        )
+        self.lidar_x_scale.pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.lidar_y_label = tk.Label(self.panel, text="LiDAR Y")
+        self.lidar_y_label.pack(anchor="w", padx=12)
+        self.lidar_y_scale = tk.Scale(
+            self.panel,
+            from_=0.0,
+            to=1.0,
+            resolution=0.01,
+            orient=tk.HORIZONTAL,
+            length=260,
+            variable=self.lidar_y_var,
+        )
+        self.lidar_y_scale.pack(anchor="w", padx=12, pady=(0, 12))
+
+        self.stats = tk.Label(self.panel, text="", justify=tk.LEFT, font=("Menlo", 12))
+        self.stats.pack(anchor="w", padx=12, pady=(8, 12))
+
+        self._on_manual_toggle()
+
+    def _on_manual_toggle(self):
+        state = tk.NORMAL if self.manual_var.get() else tk.DISABLED
+        self.step_scale.configure(state=state)
+        self.breath_scale.configure(state=state)
+
+    def _tick(self):
+        is_active = bool(self.present_var.get())
+        lidar_coord = (float(self.lidar_x_var.get()), float(self.lidar_y_var.get()))
+
+        if self.manual_var.get():
+            step_speed = float(self.step_var.get())
+            breath_cycle = float(self.breath_var.get())
+        else:
+            step_speed = None
+            breath_cycle = None
+
+        flower, archived = self.system.update(
+            delta_time=0.1,
+            is_active=is_active,
+            step_speed=step_speed,
+            breath_cycle=breath_cycle,
+            lidar_coord=lidar_coord,
+        )
+        self.last_flower = flower
+        if archived is not None:
+            self.last_archived = archived
+
+        self._render(flower)
+        self._render_stats(flower, archived)
+
+        self.root.after(100, self._tick)
+
+    def _render_stats(self, flower, archived):
+        lines = []
+        lines.append(f"present: {bool(self.present_var.get())}")
+        lines.append(f"lidar: ({self.lidar_x_var.get():.2f}, {self.lidar_y_var.get():.2f})")
+        if isinstance(flower, dict):
+            lines.append(f"asset: {flower.get('asset')}")
+            lines.append(f"color: {flower.get('color')} ({flower.get('color_hex')})")
+            lines.append(f"contour: {flower.get('contour')}")
+            lines.append(f"petal_layers: {flower.get('petal_layers')}")
+            lines.append(f"latent_step: {flower.get('step_latent')}")
+            lines.append(f"latent_breath: {flower.get('breath_latent'):.2f}")
+            lines.append(f"blur: {flower.get('blur'):.2f}")
+        else:
+            lines.append("active_flower: None")
+            lines.append(f"blur: {self.system.current_blur:.2f}")
+        if archived is not None:
+            lines.append(f"archived: {archived.get('asset_id')}")
+            edge = archived.get("edge_pos")
+            if isinstance(edge, (tuple, list)) and len(edge) == 2:
+                lines.append(f"edge_pos: ({edge[0]:.2f}, {edge[1]:.2f})")
+        lines.append(f"archive_count: {len(self.system.mandala_database)}")
+        self.stats.configure(text="\n".join(lines))
+
+    def _render(self, flower):
+        self.canvas.delete("all")
+
+        self._render_mandala()
+
+        cx, cy = 320, 320
+        blur = self.system.current_blur
+        if isinstance(flower, dict):
+            self._draw_flower(flower, cx, cy, scale=1.0, blur=blur)
+        else:
+            placeholder = {
+                "color_hex": "#9ca3af",
+                "contour": "smooth",
+                "petal_layers": 3,
+            }
+            self._draw_flower(placeholder, cx, cy, scale=1.0, blur=blur)
+
+        if blur > 0.0:
+            intensity = min(1.0, blur / 50.0)
+            if intensity > 0.66:
+                stipple = "gray12"
+            elif intensity > 0.33:
+                stipple = "gray25"
+            else:
+                stipple = "gray50"
+            self.canvas.create_rectangle(0, 0, 640, 640, fill="#0b1020", outline="", stipple=stipple)
+
+    def _render_mandala(self):
+        entries = self.system.mandala_database
+        if not entries:
+            return
+
+        w = int(self.canvas["width"])
+        h = int(self.canvas["height"])
+
+        cols_top = 10
+        rows_side = 8
+        slots = (cols_top * 2) + (rows_side * 2)
+        size = 46
+
+        for i, entry in enumerate(entries[-self.system.max_mandala_entries :]):
+            flower = entry.get("flower")
+            if not isinstance(flower, dict):
+                continue
+
+            edge = entry.get("edge_pos")
+            if isinstance(edge, (tuple, list)) and len(edge) == 2:
+                edge_x = float(edge[0])
+                edge_y = float(edge[1])
+                x = edge_x * w
+                y = edge_y * h
+                ring = i // slots
+                dx = (x - (w / 2.0))
+                dy = (y - (h / 2.0))
+                mag = math.hypot(dx, dy)
+                if mag < 1e-6:
+                    dx, dy = 1.0, 0.0
+                    mag = 1.0
+                nx, ny = dx / mag, dy / mag
+                x = x - nx * (10 + ring * 8)
+                y = y - ny * (10 + ring * 8)
+            else:
+                ring = i // slots
+                slot = i % slots
+                inset = 10 + ring * 8
+
+                if slot < cols_top:
+                    x = inset + (slot + 0.5) * ((w - 2 * inset) / cols_top)
+                    y = inset
+                elif slot < cols_top + rows_side:
+                    k = slot - cols_top
+                    x = w - inset
+                    y = inset + (k + 0.5) * ((h - 2 * inset) / rows_side)
+                elif slot < cols_top + rows_side + cols_top:
+                    k = slot - (cols_top + rows_side)
+                    x = w - inset - (k + 0.5) * ((w - 2 * inset) / cols_top)
+                    y = h - inset
+                else:
+                    k = slot - (cols_top + rows_side + cols_top)
+                    x = inset
+                    y = h - inset - (k + 0.5) * ((h - 2 * inset) / rows_side)
+
+            pseudo = {
+                "color_hex": flower.get("color_hex") or "#9ca3af",
+                "contour": flower.get("contour") or "smooth",
+                "petal_layers": flower.get("petal_layers") if isinstance(flower.get("petal_layers"), int) else 3,
+            }
+            self._draw_flower(pseudo, x, y, scale=0.35, blur=0.0, background=True)
+
+            self.canvas.create_oval(
+                x - size * 0.18,
+                y - size * 0.18,
+                x + size * 0.18,
+                y + size * 0.18,
+                outline="#111827",
+                width=1,
+            )
+
+    def _draw_flower(self, flower, cx, cy, scale=1.0, blur=0.0, background=False):
+        color = flower.get("color_hex") or "#9ca3af"
+        contour = flower.get("contour")
+        layers = flower.get("petal_layers")
+        if not isinstance(layers, int):
+            layers = 3
+
+        base_radius = 70 * scale
+        outline = "" if background else "#0b1020"
+
+        if blur > 0.0:
+            intensity = min(1.0, blur / 50.0)
+            glow = int(22 + 56 * intensity)
+            if intensity > 0.66:
+                stipple = "gray12"
+            elif intensity > 0.33:
+                stipple = "gray25"
+            else:
+                stipple = "gray50"
+            self.canvas.create_oval(
+                cx - (base_radius + glow),
+                cy - (base_radius + glow),
+                cx + (base_radius + glow),
+                cy + (base_radius + glow),
+                fill=color,
+                outline="",
+                stipple=stipple,
+            )
+
+        for layer_idx in range(layers):
+            r = base_radius + layer_idx * (28 * scale)
+            petal_count = int(8 + layer_idx * 2)
+
+            for i in range(petal_count):
+                angle = (i / petal_count) * 6.283185307179586
+                px = cx + r * 0.65 * math.cos(angle)
+                py = cy + r * 0.65 * math.sin(angle)
+
+                w = (28 + layer_idx * 3) * scale
+                h = (58 + layer_idx * 5) * scale
+
+                if contour == "sharp":
+                    x1, y1 = px, py - h * 0.55
+                    x2, y2 = px - w * 0.6, py + h * 0.45
+                    x3, y3 = px + w * 0.6, py + h * 0.45
+                    self.canvas.create_polygon(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x3,
+                        y3,
+                        fill=color,
+                        outline=outline,
+                        width=1,
+                    )
+                else:
+                    self.canvas.create_oval(
+                        px - w,
+                        py - h,
+                        px + w,
+                        py + h,
+                        fill=color,
+                        outline=outline,
+                        width=1,
+                    )
+
+        core_r = 16 * scale
+        core_bg = "#0b1020" if not background else "#111827"
+        self.canvas.create_oval(cx - core_r * 1.6, cy - core_r * 1.6, cx + core_r * 1.6, cy + core_r * 1.6, fill=core_bg, outline="")
+        self.canvas.create_oval(cx - core_r, cy - core_r, cx + core_r, cy + core_r, fill=color, outline="")
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
+
